@@ -2,6 +2,11 @@
 #
 # Script to stop the service and uninstall TDengine, but retain the config, data and log files.
 
+set -e
+#set -x
+
+verMode=edge
+
 RED='\033[0;31m'
 GREEN='\033[1;32m'
 NC='\033[0m'
@@ -14,10 +19,15 @@ cfg_link_dir="/usr/local/taos/cfg"
 bin_link_dir="/usr/bin"
 lib_link_dir="/usr/lib"
 inc_link_dir="/usr/include"
+install_nginxd_dir="/usr/local/nginxd"
+
+# v1.5 jar dir
+v15_java_app_dir="/usr/local/lib/taos"
 
 service_config_dir="/etc/systemd/system"
 taos_service_name="taosd"
-
+tarbitrator_service_name="tarbitratord"
+nginx_service_name="nginxd"
 csudo=""
 if command -v sudo > /dev/null; then
     csudo="sudo"
@@ -50,6 +60,12 @@ function kill_taosd() {
   fi
 }
 
+function kill_tarbitrator() {
+  pid=$(ps -ef | grep "tarbitrator" | grep -v "grep" | awk '{print $2}')
+  if [ -n "$pid" ]; then
+    ${csudo} kill -9 $pid   || :
+  fi
+}
 function clean_bin() {
     # Remove link
     ${csudo} rm -f ${bin_link_dir}/taos      || :
@@ -62,6 +78,7 @@ function clean_bin() {
 function clean_lib() {
     # Remove link
     ${csudo} rm -f ${lib_link_dir}/libtaos.*      || :
+    ${csudo} rm -rf ${v15_java_app_dir}                      || :
 }
 
 function clean_header() {
@@ -90,6 +107,29 @@ function clean_service_on_systemd() {
     ${csudo} systemctl disable ${taos_service_name} &> /dev/null || echo &> /dev/null
 
     ${csudo} rm -f ${taosd_service_config}
+
+    if [ "$verMode" == "cluster" ]; then
+        tarbitratord_service_config="${service_config_dir}/${tarbitrator_service_name}.service"
+
+        if systemctl is-active --quiet ${tarbitrator_service_name}; then
+            echo "TDengine tarbitrator is running, stopping it..."
+            ${csudo} systemctl stop ${tarbitrator_service_name} &> /dev/null || echo &> /dev/null
+        fi
+        ${csudo} systemctl disable ${tarbitrator_service_name} &> /dev/null || echo &> /dev/null
+
+        ${csudo} rm -f ${tarbitratord_service_config}
+        
+		    nginx_service_config="${service_config_dir}/${nginx_service_name}.service"	
+   	 	  if [ -d ${bin_dir}/web ]; then
+   	        if systemctl is-active --quiet ${nginx_service_name}; then
+   	            echo "Nginx for TDengine is running, stopping it..."
+   	            ${csudo} systemctl stop ${nginx_service_name} &> /dev/null || echo &> /dev/null
+   	        fi
+   	        ${csudo} systemctl disable ${nginx_service_name} &> /dev/null || echo &> /dev/null
+        
+   	        ${csudo} rm -f ${nginx_service_config}
+   	    fi
+    fi 
 }
 
 function clean_service_on_sysvinit() {
@@ -100,16 +140,25 @@ function clean_service_on_sysvinit() {
         echo "TDengine taosd is running, stopping it..."
         ${csudo} service taosd stop || :
     fi
-
+    
+    if pidof tarbitrator &> /dev/null; then
+        echo "TDengine tarbitrator is running, stopping it..."
+        ${csudo} service tarbitratord stop || :
+    fi
+    
     if ((${initd_mod}==1)); then
         ${csudo} chkconfig --del taosd || :
+        ${csudo} chkconfig --del tarbitratord || :
     elif ((${initd_mod}==2)); then
         ${csudo} insserv -r taosd || :
+        ${csudo} insserv -r tarbitratord || :
     elif ((${initd_mod}==3)); then
         ${csudo} update-rc.d -f taosd remove || :
+        ${csudo} update-rc.d -f tarbitratord remove || :
     fi
     
     ${csudo} rm -f ${service_config_dir}/taosd || :
+    ${csudo} rm -f ${service_config_dir}/tarbitratord || :
    
     if $(which init &> /dev/null); then
         ${csudo} init q || :
@@ -124,6 +173,7 @@ function clean_service() {
     else
         # must manual stop taosd
         kill_taosd
+        kill_tarbitrator
     fi
 }
 
@@ -143,6 +193,7 @@ clean_config
 ${csudo} rm -rf ${data_link_dir}    || : 
 
 ${csudo} rm -rf ${install_main_dir}
+${csudo} rm -rf ${install_nginxd_dir}
 
 osinfo=$(awk -F= '/^NAME/{print $2}' /etc/os-release)
 if echo $osinfo | grep -qwi "ubuntu" ; then

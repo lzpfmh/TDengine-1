@@ -15,25 +15,13 @@
 
 #include "os.h"
 #include "shell.h"
-#include "tsclient.h"
-#include "tutil.h"
 
-TAOS*     con;
 pthread_t pid;
-int32_t   TIMESTAMP_OUTPUT_LENGTH = 22;
 
 // TODO: IMPLEMENT INTERRUPT HANDLER.
 void interruptHandler(int signum) {
 #ifdef LINUX
-  TAOS_RES* res = taos_use_result(con);
-  taos_stop_query(res);
-  if (res != NULL) {
-    /*
-     * we need to free result in async model, in order to avoid free
-     * results while the master thread is waiting for server response.
-     */
-    tscQueueAsyncFreeResult(res);
-  }
+  taos_stop_query(result);
   result = NULL;
 #else
   printf("\nReceive ctrl+c or other signal, quit shell.\n");
@@ -62,7 +50,19 @@ int checkVersion() {
 }
 
 // Global configurations
-struct arguments args = {NULL, NULL, NULL, NULL, NULL, false, false, "\0", NULL};
+SShellArguments args = {
+  .host = NULL,
+  .password = NULL,
+  .user = NULL,
+  .database = NULL,
+  .timezone = NULL,
+  .is_raw_time = false,
+  .is_use_passwd = false,
+  .file = "\0",
+  .dir = "\0",
+  .threadNum = 5,
+  .commands = NULL
+};
 
 /*
  * Main function.
@@ -77,14 +77,15 @@ int main(int argc, char* argv[]) {
   shellParseArgument(argc, argv, &args);
 
   /* Initialize the shell */
-  con = shellInit(&args);
+  TAOS* con = shellInit(&args);
   if (con == NULL) {
-    taos_error(con);
     exit(EXIT_FAILURE);
   }
 
-  /* Interupt handler. */
+  /* Interrupt handler. */
   struct sigaction act;
+  memset(&act, 0, sizeof(struct sigaction));
+  
   act.sa_handler = interruptHandler;
   sigaction(SIGTERM, &act, NULL);
   sigaction(SIGINT, &act, NULL);
@@ -97,5 +98,4 @@ int main(int argc, char* argv[]) {
     pthread_create(&pid, NULL, shellLoopQuery, con);
     pthread_join(pid, NULL);
   }
-  return 0;
 }

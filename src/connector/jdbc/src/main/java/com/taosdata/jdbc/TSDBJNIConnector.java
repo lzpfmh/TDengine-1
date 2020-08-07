@@ -19,7 +19,7 @@ import java.sql.SQLWarning;
 import java.util.List;
 
 public class TSDBJNIConnector {
-    static volatile Boolean isInitialized = false;
+    private static volatile Boolean isInitialized = false;
 
     static {
         System.loadLibrary("taos");
@@ -51,8 +51,6 @@ public class TSDBJNIConnector {
 
     /**
      * Returns the status of last result set in current connection
-     *
-     * @return
      */
     public boolean isResultsetClosed() {
         return this.isResultsetClosed;
@@ -99,7 +97,7 @@ public class TSDBJNIConnector {
 
         this.taos = this.connectImp(host, port, dbName, user, password);
         if (this.taos == TSDBConstants.JNI_NULL_POINTER) {
-            throw new SQLException(TSDBConstants.WrapErrMsg(this.getErrMsg()), "", this.getErrCode());
+            throw new SQLException(TSDBConstants.WrapErrMsg(this.getErrMsg(0L)), "", this.getErrCode(0l));
         }
 
         return true;
@@ -112,57 +110,56 @@ public class TSDBJNIConnector {
      *
      * @throws SQLException
      */
-    public int executeQuery(String sql) throws SQLException {
+    public long executeQuery(String sql) throws SQLException {
         if (!this.isResultsetClosed) {
             freeResultSet(taosResultSetPointer);
         }
 
-        int code;
+        Long pSql = 0l;
         try {
-            code = this.executeQueryImp(sql.getBytes(TaosGlobalConfig.getCharset()), this.taos);
+            pSql = this.executeQueryImp(sql.getBytes(TaosGlobalConfig.getCharset()), this.taos);
         } catch (Exception e) {
             e.printStackTrace();
+            this.freeResultSet(pSql);
             throw new SQLException(TSDBConstants.WrapErrMsg("Unsupported encoding"));
         }
-        affectedRows = code;
-        if (code < 0) {
+        int code = this.getErrCode(pSql);
+        if (code != 0) {
             affectedRows = -1;
-            if (code == TSDBConstants.JNI_TDENGINE_ERROR) {
-                throw new SQLException(TSDBConstants.WrapErrMsg(this.getErrMsg()), "", this.getErrCode());
-            } else {
-                throw new SQLException(TSDBConstants.FixErrMsg(code), "", this.getErrCode());
-            }
+            String err_msg = this.getErrMsg(pSql);
+            this.freeResultSet(pSql);
+            throw new SQLException(TSDBConstants.WrapErrMsg(err_msg), "", code);
         }
 
         // Try retrieving result set for the executed SQL using the current connection pointer. If the executed
         // SQL is a DML/DDL which doesn't return a result set, then taosResultSetPointer should be 0L. Otherwise,
         // taosResultSetPointer should be a non-zero value.
-        taosResultSetPointer = this.getResultSetImp(this.taos);
+        taosResultSetPointer = this.getResultSetImp(this.taos, pSql);
         if (taosResultSetPointer != TSDBConstants.JNI_NULL_POINTER) {
             isResultsetClosed = false;
         }
-        return code;
+        return pSql;
     }
 
-    private native int executeQueryImp(byte[] sqlBytes, long connection);
+    private native long executeQueryImp(byte[] sqlBytes, long connection);
 
     /**
      * Get recent error code by connection
      */
-    public int getErrCode() {
-        return Math.abs(this.getErrCodeImp(this.taos));
+    public int getErrCode(long pSql) {
+        return this.getErrCodeImp(this.taos, pSql);
     }
 
-    private native int getErrCodeImp(long connection);
+    private native int getErrCodeImp(long connection, long pSql);
 
     /**
      * Get recent error message by connection
      */
-    public String getErrMsg() {
-        return this.getErrMsgImp(this.taos);
+    public String getErrMsg(long pSql) {
+        return this.getErrMsgImp(pSql);
     }
 
-    private native String getErrMsgImp(long connection);
+    private native String getErrMsgImp(long pSql);
 
     /**
      * Get resultset pointer
@@ -172,7 +169,7 @@ public class TSDBJNIConnector {
         return taosResultSetPointer;
     }
 
-    private native long getResultSetImp(long connection);
+    private native long getResultSetImp(long connection, long pSql);
 
     /**
      * Free resultset operation from C to release resultset pointer by JNI
@@ -194,8 +191,6 @@ public class TSDBJNIConnector {
     /**
      * Close the open result set which is associated to the current connection. If the result set is already
      * closed, return 0 for success.
-     *
-     * @return
      */
     public int freeResultSet() {
         int resCode = TSDBConstants.JNI_SUCCESS;
@@ -212,15 +207,15 @@ public class TSDBJNIConnector {
     /**
      * Get affected rows count
      */
-    public int getAffectedRows() {
+    public int getAffectedRows(long pSql) {
         int affectedRows = this.affectedRows;
         if (affectedRows < 0) {
-            affectedRows = this.getAffectedRowsImp(this.taos);
+            affectedRows = this.getAffectedRowsImp(this.taos, pSql);
         }
         return affectedRows;
     }
 
-    private native int getAffectedRowsImp(long connection);
+    private native int getAffectedRowsImp(long connection, long pSql);
 
     /**
      * Get schema metadata
@@ -248,7 +243,7 @@ public class TSDBJNIConnector {
     public void closeConnection() throws SQLException {
         int code = this.closeConnectionImp(this.taos);
         if (code < 0) {
-            throw new SQLException(TSDBConstants.FixErrMsg(code), "", this.getErrCode());
+            throw new SQLException(TSDBConstants.FixErrMsg(code), "", this.getErrCode(0l));
         } else if (code == 0) {
             this.taos = TSDBConstants.JNI_NULL_POINTER;
         } else {
@@ -261,31 +256,31 @@ public class TSDBJNIConnector {
     /**
      * Subscribe to a table in TSDB
      */
-    public long subscribe(String host, String user, String password, String database, String table, long time, int period) {
-        return subscribeImp(host, user, password, database, table, time, period);
+    public long subscribe(String topic, String sql, boolean restart, int period) {
+        return subscribeImp(this.taos, restart, topic, sql, period);
     }
 
-    private native long subscribeImp(String host, String user, String password, String database, String table, long time, int period);
+    public native long subscribeImp(long connection, boolean restart, String topic, String sql, int period);
 
     /**
      * Consume a subscribed table
      */
-    public TSDBResultSetRowData consume(long subscription) {
+    public long consume(long subscription) {
         return this.consumeImp(subscription);
     }
 
-    private native TSDBResultSetRowData consumeImp(long subscription);
+    private native long consumeImp(long subscription);
 
     /**
      * Unsubscribe a table
      *
      * @param subscription
      */
-    public void unsubscribe(long subscription) {
-        unsubscribeImp(subscription);
+    public void unsubscribe(long subscription, boolean isKeep) {
+        unsubscribeImp(subscription, isKeep);
     }
 
-    private native void unsubscribeImp(long subscription);
+    private native void unsubscribeImp(long subscription, boolean isKeep);
 
     /**
      * Validate if a <I>create table</I> sql statement is correct without actually creating that table
